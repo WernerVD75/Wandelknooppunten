@@ -1,0 +1,258 @@
+<!DOCTYPE html> 
+<html lang="nl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wandelroute Planner & Navigatie</title>
+
+  <!-- Leaflet CSS & JS -->
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    * { box-sizing: border-box; }
+    body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; }
+    #controls { padding: 10px; background: #f4f4f4; border-bottom: 1px solid #ccc; z-index: 1000; }
+    #map { flex: 1; width: 100%; }
+    .btn { padding: 8px 12px; margin-right: 5px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
+    .btn:disabled { background: #ccc; cursor: not-allowed; }
+    .btn-danger { background: #dc3545; }
+    .btn-success { background: #28a745; }
+    #route-info { margin-top: 8px; font-size: 14px; font-weight: bold; }
+    #status { margin-top: 5px; color: #555; font-size: 13px; }
+  </style>
+</head>
+<body>
+
+  <div id="controls">
+    <button id="btn-start-nav" class="btn btn-success" disabled onclick="startNavigatie()">▶ Start Navigatie</button>
+    <button id="btn-stop-nav" class="btn btn-danger" onclick="stopNavigatie()" style="display:none;">⏹ Stop Navigatie</button>
+    <button class="btn btn-danger" onclick="reseteerRoute()">Wis Route</button>
+    <div id="route-info">Geselecteerde route: <span id="route-list">Geen</span></div>
+    <div id="status">Knooppunten laden...</div>
+  </div>
+
+  <div id="map"></div>
+
+  <script>
+    // 1. Initiële kaart instellen (gericht op Vlaanderen/Zuid-Nederland)
+    const map = L.map('map').setView([51.3184, 4.8582], 11);
+    L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      attribution: '© OpenStreetMap'
+    }).addTo(map);
+
+    let routeNodes = [];
+    let routeLine = L.polyline([], { color: 'blue', weight: 5 }).addTo(map);
+    let userMarker = null;
+    let watchPositionId = null;
+    let lastSpokenInstruction = "";
+
+    // 2. Bestanden inladen (zowel BE als NL)
+    async function laadKnooppunten() {
+      const bestanden = ['wandelknooppuntenbe.txt', 'wandelknooppuntennl.txt'];
+      let totaalGeladen = 0;
+
+      for (const bestand of bestanden) {
+        try {
+          const response = await fetch(bestand);
+          if (!response.ok) continue;
+          const text = await response.text();
+          const lines = text.trim().split('\n');
+
+          lines.forEach(line => {
+            const parts = line.split(',');
+            if (parts.length >= 3) {
+              const lon = parseFloat(parts[0]);
+              const lat = parseFloat(parts[1]);
+              const ref = parts[2].trim();
+
+              if (!isNaN(lat) && !isNaN(lon) && ref) {
+                voegKnooppuntToeAanKaart(lat, lon, ref);
+                totaalGeladen++;
+              }
+            }
+          });
+        } catch (e) {
+          console.warn("Kon bestand niet laden:", bestand);
+        }
+      }
+
+      document.getElementById('status').innerText = `Geladen knooppunten: ${totaalGeladen}`;
+    }
+
+    // 3. Knooppunt markeringen op kaart zetten
+    function voegKnooppuntToeAanKaart(lat, lon, ref) {
+      const icon = L.divIcon({
+        className: 'node-icon',
+        html: `<div style="background:green; color:white; border-radius:50%; width:24px; height:24px; text-align:center; line-height:24px; font-weight:bold; font-size:11px; border:1px solid white;">${ref}</div>`,
+        iconSize: [24, 24]
+      });
+
+      const marker = L.marker([lat, lon], { icon: icon }).addTo(map);
+
+      marker.on('click', () => {
+        voegPuntToeAanRoute({ lat, lon, ref });
+      });
+    }
+
+    // 4. Route opbouwen
+    function voegPuntToeAanRoute(node) {
+      routeNodes.push(node);
+      updateRouteOpKaart();
+    }
+
+    function updateRouteOpKaart() {
+      const coords = routeNodes.map(n => [n.lat, n.lon]);
+      routeLine.setLatLngs(coords);
+
+      const labels = routeNodes.map(n => n.ref).join(' ➔ ');
+      document.getElementById('route-list').innerText = labels || 'Geen';
+      document.getElementById('btn-start-nav').disabled = routeNodes.length < 2;
+    }
+
+    function reseteerRoute() {
+      routeNodes = [];
+      updateRouteOpKaart();
+      stopNavigatie();
+    }
+
+    // 5. Spraakfunctie (Text-to-Speech)
+    function spreekText(tekst) {
+      if ('speechSynthesis' in window && tekst !== lastSpokenInstruction) {
+        window.speechSynthesis.cancel(); // Stop eventuele vorige spraak
+        const utterance = new SpeechSynthesisUtterance(tekst);
+        utterance.lang = 'nl-NL'; // Nederlands gesproken
+        utterance.rate = 1.0;
+        window.speechSynthesis.speak(utterance);
+        lastSpokenInstruction = tekst;
+        document.getElementById('status').innerText = "Gesproken: " + tekst;
+      }
+    }
+
+    // 6. Afstand & Richting berekenen (Haversine & Bearing)
+    function berekenAfstand(lat1, lon1, lat2, lon2) {
+      const R = 6371000; // Radius aarde in meters
+      const dLat = (lat2 - lat1) * Math.PI / 180;
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
+                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+                Math.sin(dLon/2) * Math.sin(dLon/2);
+      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+    }
+
+    function berekenKoers(lat1, lon1, lat2, lon2) {
+      const dLon = (lon2 - lon1) * Math.PI / 180;
+      const y = Math.sin(dLon) * Math.cos(lat2 * Math.PI / 180);
+      const x = Math.cos(lat1 * Math.PI / 180) * Math.sin(lat2 * Math.PI / 180) -
+                Math.sin(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.cos(dLon);
+      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+    }
+
+    // 7. Live Navigatie & GPS tracking
+    let huidigDoelIndex = 1;
+
+    function startNavigatie() {
+      if (!navigator.geolocation) {
+        alert("GPS wordt niet ondersteund door je browser.");
+        return;
+      }
+
+      huidigDoelIndex = 1;
+      document.getElementById('btn-start-nav').style.display = 'none';
+      document.getElementById('btn-stop-nav').style.display = 'inline-block';
+
+      spreekText("Navigatie gestart. Volg de route naar knooppunt " + routeNodes[0].ref);
+
+      watchPositionId = navigator.geolocation.watchPosition(verwerkGpsPositie, (err) => {
+        console.error("GPS Fout:", err);
+      }, {
+        enableHighAccuracy: true,
+        maximumAge: 1000,
+        timeout: 5000
+      });
+    }
+
+    function stopNavigatie() {
+      if (watchPositionId) {
+        navigator.geolocation.clearWatch(watchPositionId);
+        watchPositionId = null;
+      }
+      document.getElementById('btn-start-nav').style.display = 'inline-block';
+      document.getElementById('btn-stop-nav').style.display = 'none';
+      spreekText("Navigatie gestopt.");
+    }
+
+    function verwerkGpsPositie(pos) {
+      const userLat = pos.coords.latitude;
+      const userLon = pos.coords.longitude;
+      const heading = pos.coords.heading; // Looprichting volgens GPS
+
+      // Update gebruikerslocatie op kaart
+      if (!userMarker) {
+        userMarker = L.marker([userLat, userLon]).addTo(map);
+      } else {
+        userMarker.setLatLng([userLat, userLon]);
+      }
+
+      if (huidigDoelIndex >= routeNodes.length) {
+        spreekText("Gefeliciteerd, je hebt het eindpunt bereikt!");
+        stopNavigatie();
+        return;
+      }
+
+      const doelNode = routeNodes[huidigDoelIndex];
+      const afstand = berekenAfstand(userLat, userLon, doelNode.lat, doelNode.lon);
+
+      // Controleer of knooppunt bereikt is (< 20 meter)
+      if (afstand < 20) {
+        spreekText(`Je bent bij knooppunt ${doelNode.ref}. Wandel nu naar knooppunt ${routeNodes[huidigDoelIndex + 1]?.ref || 'het eindpunt'}`);
+        huidigDoelIndex++;
+        return;
+      }
+
+      // Geef afslaginstructies als de looprichting bekend is
+      if (heading !== null && !isNaN(heading)) {
+        const doelKoers = berekenKoers(userLat, userLon, doelNode.lat, doelNode.lon);
+        let hoekVerschil = (doelKoers - heading + 360) % 360;
+
+        if (afstand < 50) { // Binnen 50 meter van afslag
+          if (hoekVerschil > 45 && hoekVerschil < 135) {
+            spreekText(`Over ${Math.round(afstand)} meter rechtsaf naar knooppunt ${doelNode.ref}`);
+          } else if (hoekVerschil > 225 && hoekVerschil < 315) {
+            spreekText(`Over ${Math.round(afstand)} meter linksaf naar knooppunt ${doelNode.ref}`);
+          } else if (hoekVerschil <= 45 || hoekVerschil >= 315) {
+            spreekText(`Blijf rechtdoor lopen naar knooppunt ${doelNode.ref}`);
+          }
+        }
+      }
+    }
+
+    // Laad knooppunten bij het openen van de pagina
+    laadKnooppunten();
+  </script>
+</body>
+</html>
+
+// AUTOMATISCHE OFFLINE BEWAREN
+        if ('serviceWorker' in navigator) {
+            window.addEventListener('load', () => {
+                const swCode = `
+                    const CACHE = 'wf-cache-v1';
+                    self.addEventListener('install', e => {
+                        e.waitUntil(caches.open(CACHE).then(c => c.add(location.href)));
+                        self.skipWaiting();
+                    });
+                    self.addEventListener('activate', e => self.clients.claim());
+                    self.addEventListener('fetch', e => {
+                        e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
+                    });
+                `;
+                const blob = new Blob([swCode], { type: 'application/javascript' });
+                const swUrl = URL.createObjectURL(blob);
+                navigator.serviceWorker.register(swUrl).catch(() => {});
+            });
+        }
+  </script>
+</body>
+</html>
