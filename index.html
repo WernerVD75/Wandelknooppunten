@@ -1,258 +1,464 @@
-<!DOCTYPE html> 
+<!DOCTYPE html>
 <html lang="nl">
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Wandelroute Planner & Navigatie</title>
+  <title>Wandelnetwerk Planner & Spraaknavigatie</title>
 
   <!-- Leaflet CSS & JS -->
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
+  <!-- PapaParse voor snel inlezen van CSV/TXT -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
+
   <style>
-    * { box-sizing: border-box; }
-    body { font-family: Arial, sans-serif; margin: 0; padding: 0; display: flex; flex-direction: column; height: 100vh; }
-    #controls { padding: 10px; background: #f4f4f4; border-bottom: 1px solid #ccc; z-index: 1000; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; flex-direction: column; height: 100vh; }
+    
+    #controls {
+      padding: 10px 14px;
+      background-color: #f8f9fa;
+      border-bottom: 1px solid #ddd;
+      display: flex;
+      gap: 8px;
+      align-items: center;
+      flex-wrap: wrap;
+      z-index: 1000;
+    }
+
+    button {
+      padding: 7px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+    }
+
+    select {
+      padding: 6px 10px;
+      font-size: 13px;
+      border-radius: 6px;
+      border: 1px solid #ccc;
+      background: white;
+      max-width: 200px;
+    }
+
+    .btn-success { background-color: #28a745; color: white; }
+    .btn-primary { background-color: #007bff; color: white; }
+    .btn-danger { background-color: #dc3545; color: white; }
+    .btn-secondary { background-color: #6c757d; color: white; }
+
+    #info { font-size: 14px; font-weight: bold; color: #333; margin-left: auto; }
+    #status { font-size: 13px; color: #28a745; font-weight: 600; width: 100%; margin-top: 4px; }
     #map { flex: 1; width: 100%; }
-    .btn { padding: 8px 12px; margin-right: 5px; cursor: pointer; background: #007bff; color: white; border: none; border-radius: 4px; font-weight: bold; }
-    .btn:disabled { background: #ccc; cursor: not-allowed; }
-    .btn-danger { background: #dc3545; }
-    .btn-success { background: #28a745; }
-    #route-info { margin-top: 8px; font-size: 14px; font-weight: bold; }
-    #status { margin-top: 5px; color: #555; font-size: 13px; }
+
+    .wandel-badge {
+      background-color: #28a745;
+      color: white;
+      border: 2px solid white;
+      border-radius: 50%;
+      text-align: center;
+      font-weight: bold;
+      font-size: 12px;
+      line-height: 24px;
+      box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+    }
   </style>
 </head>
 <body>
 
   <div id="controls">
-    <button id="btn-start-nav" class="btn btn-success" disabled onclick="startNavigatie()">▶ Start Navigatie</button>
-    <button id="btn-stop-nav" class="btn btn-danger" onclick="stopNavigatie()" style="display:none;">⏹ Stop Navigatie</button>
-    <button class="btn btn-danger" onclick="reseteerRoute()">Wis Route</button>
-    <div id="route-info">Geselecteerde route: <span id="route-list">Geen</span></div>
-    <div id="status">Knooppunten laden...</div>
+    <button id="btn-start" class="btn-success" onclick="startNavigatie()">▶ Start Navigatie</button>
+    <button id="btn-stop" class="btn-danger" onclick="stopNavigatie()" style="display:none;">⏹ Stop Navigatie</button>
+    
+    <button class="btn-primary" onclick="slaRouteOp()">💾 Route Opslaan</button>
+    
+    <!-- Selectieknop voor opgeslagen routes -->
+    <select id="saved-routes-select" onchange="laadOpgeslagenRoute(this.value)">
+      <option value="">-- Opgeslagen routes --</option>
+    </select>
+    <button class="btn-danger" onclick="verwijderOpgeslagenRoute()" title="Geselecteerde opgeslagen route verwijderen">🗑️</button>
+
+    <button class="btn-secondary" onclick="undoLast()">Laatste punt wissen</button>
+    <button class="btn-danger" onclick="clearAll()">Alles wissen</button>
+
+    <span id="info">Wandelknooppunten: 0 | 0.0 km</span>
+    <div id="status">Wandelknooppunten laden...</div>
   </div>
 
   <div id="map"></div>
 
   <script>
-    // 1. Initiële kaart instellen (gericht op Vlaanderen/Zuid-Nederland)
-    const map = L.map('map').setView([51.3184, 4.8582], 11);
+    const map = L.map('map').setView([51.318, 4.858], 13);
+
+    // Standaard kaart
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '© OpenStreetMap'
     }).addTo(map);
 
-    let routeNodes = [];
-    let routeLine = L.polyline([], { color: 'blue', weight: 5 }).addTo(map);
+    // Wandelnetwerken overlay (Waymarked Trails)
+    L.tileLayer('https://tile.waymarkedtrails.org/hiking/{z}/{x}/{y}.png', {
+      maxZoom: 19,
+      opacity: 0.8,
+      attribution: '© Waymarked Trails'
+    }).addTo(map);
+
+    let allNodes = [];
+    let waypoints = [];       
+    let routeSegments = [];   
+    let markers = [];         
+    let polylineGroup = L.featureGroup().addTo(map);
+    let currentDistanceKm = "0.0";
+    
     let userMarker = null;
-    let watchPositionId = null;
-    let lastSpokenInstruction = "";
+    let watchId = null;
+    let lastInstruction = "";
 
-    // 2. Bestanden inladen (zowel BE als NL)
-    async function laadKnooppunten() {
-      const bestanden = ['wandelknooppuntenbe.txt', 'wandelknooppuntennl.txt'];
-      let totaalGeladen = 0;
+    // Inladen van BE en NL wandelknooppunten
+    const files = ["wandelknooppuntenbe.txt", "wandelknooppuntennl.txt"];
 
-      for (const bestand of bestanden) {
+    async function laadWandelknooppunten() {
+      let geladen = 0;
+      for (const f of files) {
         try {
-          const response = await fetch(bestand);
-          if (!response.ok) continue;
-          const text = await response.text();
-          const lines = text.trim().split('\n');
-
-          lines.forEach(line => {
-            const parts = line.split(',');
-            if (parts.length >= 3) {
-              const lon = parseFloat(parts[0]);
-              const lat = parseFloat(parts[1]);
-              const ref = parts[2].trim();
-
-              if (!isNaN(lat) && !isNaN(lon) && ref) {
-                voegKnooppuntToeAanKaart(lat, lon, ref);
-                totaalGeladen++;
-              }
+          const res = await fetch(f);
+          if (!res.ok) continue;
+          const text = await res.text();
+          Papa.parse(text, {
+            skipEmptyLines: true,
+            complete: function(results) {
+              const nodes = results.data.map(row => ({
+                lon: parseFloat(row[0]),
+                lat: parseFloat(row[1]),
+                ref: row[2] ? row[2].toString().trim() : ''
+              })).filter(n => !isNaN(n.lat) && !isNaN(n.lon));
+              
+              allNodes = allNodes.concat(nodes);
+              geladen += nodes.length;
+              document.getElementById('status').innerText = `✔ ${geladen.toLocaleString()} wandelknooppunten geladen. Klik op een knooppunt...`;
             }
           });
-        } catch (e) {
-          console.warn("Kon bestand niet laden:", bestand);
-        }
+        } catch(e) {}
       }
-
-      document.getElementById('status').innerText = `Geladen knooppunten: ${totaalGeladen}`;
+      verversOpgeslagenRoutesLijst();
     }
 
-    // 3. Knooppunt markeringen op kaart zetten
-    function voegKnooppuntToeAanKaart(lat, lon, ref) {
-      const icon = L.divIcon({
-        className: 'node-icon',
-        html: `<div style="background:green; color:white; border-radius:50%; width:24px; height:24px; text-align:center; line-height:24px; font-weight:bold; font-size:11px; border:1px solid white;">${ref}</div>`,
-        iconSize: [24, 24]
-      });
+    laadWandelknooppunten();
 
-      const marker = L.marker([lat, lon], { icon: icon }).addTo(map);
+    // Klikken op een knooppunt
+    map.on('click', async function(e) {
+      if (allNodes.length === 0) return;
 
-      marker.on('click', () => {
-        voegPuntToeAanRoute({ lat, lon, ref });
-      });
-    }
-
-    // 4. Route opbouwen
-    function voegPuntToeAanRoute(node) {
-      routeNodes.push(node);
-      updateRouteOpKaart();
-    }
-
-    function updateRouteOpKaart() {
-      const coords = routeNodes.map(n => [n.lat, n.lon]);
-      routeLine.setLatLngs(coords);
-
-      const labels = routeNodes.map(n => n.ref).join(' ➔ ');
-      document.getElementById('route-list').innerText = labels || 'Geen';
-      document.getElementById('btn-start-nav').disabled = routeNodes.length < 2;
-    }
-
-    function reseteerRoute() {
-      routeNodes = [];
-      updateRouteOpKaart();
-      stopNavigatie();
-    }
-
-    // 5. Spraakfunctie (Text-to-Speech)
-    function spreekText(tekst) {
-      if ('speechSynthesis' in window && tekst !== lastSpokenInstruction) {
-        window.speechSynthesis.cancel(); // Stop eventuele vorige spraak
-        const utterance = new SpeechSynthesisUtterance(tekst);
-        utterance.lang = 'nl-NL'; // Nederlands gesproken
-        utterance.rate = 1.0;
-        window.speechSynthesis.speak(utterance);
-        lastSpokenInstruction = tekst;
-        document.getElementById('status').innerText = "Gesproken: " + tekst;
-      }
-    }
-
-    // 6. Afstand & Richting berekenen (Haversine & Bearing)
-    function berekenAfstand(lat1, lon1, lat2, lon2) {
-      const R = 6371000; // Radius aarde in meters
-      const dLat = (lat2 - lat1) * Math.PI / 180;
-      const dLon = (lon2 - lon1) * Math.PI / 180;
-      const a = Math.sin(dLat/2) * Math.sin(dLat/2) +
-                Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
-                Math.sin(dLon/2) * Math.sin(dLon/2);
-      return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
-    }
-
-    function berekenKoers(lat1, lon1, lat2, lon2) {
-      const dLon = (lon2 - lon1) * Math.PI / 180;
-      const y = Math.sin(dLon) * Math.cos(lat2 * Math.PI / 180);
-      const x = Math.cos(lat1 * Math.PI / 180) * Math.sin(lat2 * Math.PI / 180) -
-                Math.sin(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.cos(dLon);
-      return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
-    }
-
-    // 7. Live Navigatie & GPS tracking
-    let huidigDoelIndex = 1;
-
-    function startNavigatie() {
-      if (!navigator.geolocation) {
-        alert("GPS wordt niet ondersteund door je browser.");
+      const node = findClosestNode(e.latlng.lat, e.latlng.lng);
+      if (!node) {
+        document.getElementById('status').innerText = '❌ Geen wandelknooppunt dichtbij gevonden.';
         return;
       }
 
-      huidigDoelIndex = 1;
-      document.getElementById('btn-start-nav').style.display = 'none';
-      document.getElementById('btn-stop-nav').style.display = 'inline-block';
+      if (waypoints.length > 0 && waypoints[waypoints.length - 1].ref === node.ref && 
+          waypoints[waypoints.length - 1].lat === node.lat) return;
 
-      spreekText("Navigatie gestart. Volg de route naar knooppunt " + routeNodes[0].ref);
+      waypoints.push(node);
 
-      watchPositionId = navigator.geolocation.watchPosition(verwerkGpsPositie, (err) => {
-        console.error("GPS Fout:", err);
-      }, {
-        enableHighAccuracy: true,
-        maximumAge: 1000,
-        timeout: 5000
+      const customIcon = L.divIcon({
+        className: 'wandel-badge',
+        html: node.ref,
+        iconSize: [26, 26],
+        iconAnchor: [13, 13]
       });
+
+      const marker = L.marker([node.lat, node.lon], { icon: customIcon }).addTo(map);
+      markers.push(marker);
+
+      if (waypoints.length > 1) {
+        document.getElementById('status').innerText = `Wandelpad berekenen naar knooppunt ${node.ref}...`;
+        const start = waypoints[waypoints.length - 2];
+        const end = waypoints[waypoints.length - 1];
+        
+        const segmentCoords = await fetchWalkingRoute(start, end);
+        routeSegments.push(segmentCoords);
+      }
+
+      updateMap();
+    });
+
+    function findClosestNode(lat, lng) {
+      let closest = null;
+      let minDistance = Infinity;
+      for (let i = 0; i < allNodes.length; i++) {
+        const node = allNodes[i];
+        const dist = L.latLng(lat, lng).distanceTo(L.latLng(node.lat, node.lon));
+        if (dist < minDistance) {
+          minDistance = dist;
+          closest = node;
+        }
+      }
+      return minDistance < 400 ? closest : null;
+    }
+
+    // BRouter Routing over wandelpaden
+    async function fetchWalkingRoute(startNode, endNode) {
+      const brouterUrl = `https://brouter.de/brouter?lonlats=${startNode.lon},${startNode.lat}|${endNode.lon},${endNode.lat}&profile=foot&format=geojson`;
+
+      try {
+        const response = await fetch(brouterUrl);
+        const data = await response.json();
+
+        if (data.features && data.features.length > 0) {
+          const coords = data.features[0].geometry.coordinates;
+          return coords.map(c => [c[1], c[0]]);
+        }
+      } catch (err) {}
+
+      // Fallback OSRM Foot
+      const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${startNode.lon},${startNode.lat};${endNode.lon},${endNode.lat}?overview=full&geometries=geojson`;
+      try {
+        const response = await fetch(osrmUrl);
+        const data = await response.json();
+        if (data.routes && data.routes.length > 0) {
+          return data.routes[0].geometry.coordinates.map(coord => [coord[1], coord[0]]);
+        }
+      } catch (err) {}
+
+      return [[startNode.lat, startNode.lon], [endNode.lat, endNode.lon]];
+    }
+
+    function updateMap() {
+      polylineGroup.clearLayers();
+      let totalDistanceMeters = 0;
+
+      routeSegments.forEach(segment => {
+        const line = L.polyline(segment, { color: '#28a745', weight: 6, opacity: 0.85 });
+        polylineGroup.addLayer(line);
+      });
+
+      const fullPath = getFullTrackPoints();
+      for (let i = 0; i < fullPath.length - 1; i++) {
+        totalDistanceMeters += L.latLng(fullPath[i]).distanceTo(L.latLng(fullPath[i + 1]));
+      }
+
+      currentDistanceKm = (totalDistanceMeters / 1000).toFixed(1);
+      const lastWp = waypoints[waypoints.length - 1];
+      
+      document.getElementById('info').innerText = `Wandelknooppunten: ${waypoints.length} | ${currentDistanceKm} km`;
+      if (waypoints.length > 0) {
+        document.getElementById('status').innerText = `✔ Knooppunt ${lastWp.ref} toegevoegd.`;
+      }
+    }
+
+    function getFullTrackPoints() {
+      if (waypoints.length === 0) return [];
+      let fullPath = [];
+      routeSegments.forEach((segment, index) => {
+        fullPath = fullPath.concat(index === 0 ? segment : segment.slice(1));
+      });
+      return fullPath;
+    }
+
+    function undoLast() {
+      if (waypoints.length === 0) return;
+      waypoints.pop();
+      const lastMarker = markers.pop();
+      map.removeLayer(lastMarker);
+      if (routeSegments.length > 0) routeSegments.pop();
+      updateMap();
+    }
+
+    function clearAll() {
+      waypoints = [];
+      routeSegments = [];
+      markers.forEach(m => map.removeLayer(m));
+      markers = [];
+      updateMap();
+      document.getElementById('info').innerText = `Wandelknooppunten: 0 | 0.0 km`;
+      document.getElementById('status').innerText = `Kaart leeggemaakt.`;
+    }
+
+    // --- ROUTE OPSLAAN EN LADEN LOGICA ---
+
+    function getOpgeslagenRoutes() {
+      const data = localStorage.getItem('wandel_routes');
+      return data ? JSON.parse(data) : {};
+    }
+
+    function slaRouteOp() {
+      if (waypoints.length < 2) {
+        alert("Maak eerst een route van minstens 2 knooppunten voordat je opslaat.");
+        return;
+      }
+
+      const knooppuntenReeks = waypoints.map(w => w.ref).join('-');
+      const standaardNaam = `Wandeling (${knooppuntenReeks}) - ${currentDistanceKm} km`;
+      
+      const routeNaam = prompt("Geef een naam voor deze wandelroute:", standaardNaam);
+      if (!routeNaam || routeNaam.trim() === "") return;
+
+      const routes = getOpgeslagenRoutes();
+      routes[routeNaam.trim()] = {
+        waypoints: waypoints,
+        routeSegments: routeSegments,
+        distanceKm: currentDistanceKm
+      };
+
+      localStorage.setItem('wandel_routes', JSON.stringify(routes));
+      verversOpgeslagenRoutesLijst();
+      document.getElementById('saved-routes-select').value = routeNaam.trim();
+      alert(`Route "${routeNaam}" is succesvol opgeslagen!`);
+    }
+
+    function verversOpgeslagenRoutesLijst() {
+      const select = document.getElementById('saved-routes-select');
+      select.innerHTML = '<option value="">-- Opgeslagen routes --</option>';
+      const routes = getOpgeslagenRoutes();
+
+      for (const naam in routes) {
+        const option = document.createElement('option');
+        option.value = naam;
+        option.textContent = `${naam} (${routes[naam].distanceKm} km)`;
+        select.appendChild(option);
+      }
+    }
+
+    function laadOpgeslagenRoute(naam) {
+      if (!naam) return;
+      const routes = getOpgeslagenRoutes();
+      const route = routes[naam];
+      if (!route) return;
+
+      clearAll();
+
+      waypoints = route.waypoints;
+      routeSegments = route.routeSegments;
+
+      // Markers terug op kaart zetten
+      waypoints.forEach(node => {
+        const customIcon = L.divIcon({
+          className: 'wandel-badge',
+          html: node.ref,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
+        const marker = L.marker([node.lat, node.lon], { icon: customIcon }).addTo(map);
+        markers.push(marker);
+      });
+
+      updateMap();
+
+      // Zoom naar de ingeladen route
+      if (markers.length > 0) {
+        const group = L.featureGroup(markers);
+        map.fitBounds(group.getBounds().pad(0.2));
+      }
+
+      document.getElementById('status').innerText = `✔ Route "${naam}" geladen!`;
+    }
+
+    function verwijderOpgeslagenRoute() {
+      const select = document.getElementById('saved-routes-select');
+      const naam = select.value;
+      if (!naam) {
+        alert("Selecteer eerst een opgeslagen route uit de lijst om te verwijderen.");
+        return;
+      }
+
+      if (confirm(`Weet je zeker dat je "${naam}" wilt verwijderen?`)) {
+        const routes = getOpgeslagenRoutes();
+        delete routes[naam];
+        localStorage.setItem('wandel_routes', JSON.stringify(routes));
+        verversOpgeslagenRoutesLijst();
+        clearAll();
+        document.getElementById('status').innerText = `Route verwijderd.`;
+      }
+    }
+
+    // --- SPRAAKNAVIGATIE LOGICA ---
+
+    function spreek(tekst) {
+      if ('speechSynthesis' in window && tekst !== lastInstruction) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(tekst);
+        utterance.lang = 'nl-NL';
+        utterance.rate = 1.0;
+        window.speechSynthesis.speak(utterance);
+        lastInstruction = tekst;
+        document.getElementById('status').innerText = `🗣️ ${tekst}`;
+      }
+    }
+
+    let huidigKnooppuntIndex = 1;
+
+    function startNavigatie() {
+      if (waypoints.length < 2) {
+        alert("Kies of laad eerst een route om de navigatie te starten.");
+        return;
+      }
+
+      huidigKnooppuntIndex = 1;
+      document.getElementById('btn-start').style.display = 'none';
+      document.getElementById('btn-stop').style.display = 'inline-block';
+
+      spreek(`Start navigatie. Wandel naar knooppunt ${waypoints[0].ref}`);
+
+      watchId = navigator.geolocation.watchPosition(updatePositie, (err) => {
+        alert("Kan GPS-signaal niet ophalen.");
+      }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 5000 });
     }
 
     function stopNavigatie() {
-      if (watchPositionId) {
-        navigator.geolocation.clearWatch(watchPositionId);
-        watchPositionId = null;
-      }
-      document.getElementById('btn-start-nav').style.display = 'inline-block';
-      document.getElementById('btn-stop-nav').style.display = 'none';
-      spreekText("Navigatie gestopt.");
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      document.getElementById('btn-start').style.display = 'inline-block';
+      document.getElementById('btn-stop').style.display = 'none';
+      spreek("Navigatie gestopt.");
     }
 
-    function verwerkGpsPositie(pos) {
-      const userLat = pos.coords.latitude;
-      const userLon = pos.coords.longitude;
-      const heading = pos.coords.heading; // Looprichting volgens GPS
+    function updatePositie(pos) {
+      const uLat = pos.coords.latitude;
+      const uLon = pos.coords.longitude;
+      const heading = pos.coords.heading;
 
-      // Update gebruikerslocatie op kaart
       if (!userMarker) {
-        userMarker = L.marker([userLat, userLon]).addTo(map);
+        userMarker = L.marker([uLat, uLon]).addTo(map);
       } else {
-        userMarker.setLatLng([userLat, userLon]);
+        userMarker.setLatLng([uLat, uLon]);
       }
 
-      if (huidigDoelIndex >= routeNodes.length) {
-        spreekText("Gefeliciteerd, je hebt het eindpunt bereikt!");
+      if (huidigKnooppuntIndex >= waypoints.length) {
+        spreek("Je hebt de eindbestemming bereikt!");
         stopNavigatie();
         return;
       }
 
-      const doelNode = routeNodes[huidigDoelIndex];
-      const afstand = berekenAfstand(userLat, userLon, doelNode.lat, doelNode.lon);
+      const doelNode = waypoints[huidigKnooppuntIndex];
+      const afstand = L.latLng(uLat, uLon).distanceTo(L.latLng(doelNode.lat, doelNode.lon));
 
-      // Controleer of knooppunt bereikt is (< 20 meter)
-      if (afstand < 20) {
-        spreekText(`Je bent bij knooppunt ${doelNode.ref}. Wandel nu naar knooppunt ${routeNodes[huidigDoelIndex + 1]?.ref || 'het eindpunt'}`);
-        huidigDoelIndex++;
+      if (afstand < 15) {
+        huidigKnooppuntIndex++;
+        const volgendPunt = waypoints[huidigKnooppuntIndex];
+        if (volgendPunt) {
+          spreek(`Knooppunt ${doelNode.ref} bereikt. Vervolg de wandelroute naar knooppunt ${volgendPunt.ref}`);
+        }
         return;
       }
 
-      // Geef afslaginstructies als de looprichting bekend is
-      if (heading !== null && !isNaN(heading)) {
-        const doelKoers = berekenKoers(userLat, userLon, doelNode.lat, doelNode.lon);
-        let hoekVerschil = (doelKoers - heading + 360) % 360;
+      if (afstand < 40 && heading !== null && !isNaN(heading)) {
+        const dLat = (doelNode.lat - uLat) * Math.PI / 180;
+        const dLon = (doelNode.lon - uLon) * Math.PI / 180;
+        const y = Math.sin(dLon) * Math.cos(doelNode.lat * Math.PI / 180);
+        const x = Math.cos(uLat * Math.PI / 180) * Math.sin(doelNode.lat * Math.PI / 180) - Math.sin(uLat * Math.PI / 180) * Math.cos(doelNode.lat * Math.PI / 180) * Math.cos(dLon);
+        const doelKoers = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
 
-        if (afstand < 50) { // Binnen 50 meter van afslag
-          if (hoekVerschil > 45 && hoekVerschil < 135) {
-            spreekText(`Over ${Math.round(afstand)} meter rechtsaf naar knooppunt ${doelNode.ref}`);
-          } else if (hoekVerschil > 225 && hoekVerschil < 315) {
-            spreekText(`Over ${Math.round(afstand)} meter linksaf naar knooppunt ${doelNode.ref}`);
-          } else if (hoekVerschil <= 45 || hoekVerschil >= 315) {
-            spreekText(`Blijf rechtdoor lopen naar knooppunt ${doelNode.ref}`);
-          }
+        let hoek = (doelKoers - heading + 360) % 360;
+
+        if (hoek > 45 && hoek < 135) {
+          spreek(`Over ${Math.round(afstand)} meter rechtsaf wandelpad op naar knooppunt ${doelNode.ref}`);
+        } else if (hoek > 225 && hoek < 315) {
+          spreek(`Over ${Math.round(afstand)} meter linksaf wandelpad op naar knooppunt ${doelNode.ref}`);
         }
       }
     }
-
-    // Laad knooppunten bij het openen van de pagina
-    laadKnooppunten();
-  </script>
-</body>
-</html>
-
-// AUTOMATISCHE OFFLINE BEWAREN
-        if ('serviceWorker' in navigator) {
-            window.addEventListener('load', () => {
-                const swCode = `
-                    const CACHE = 'wf-cache-v1';
-                    self.addEventListener('install', e => {
-                        e.waitUntil(caches.open(CACHE).then(c => c.add(location.href)));
-                        self.skipWaiting();
-                    });
-                    self.addEventListener('activate', e => self.clients.claim());
-                    self.addEventListener('fetch', e => {
-                        e.respondWith(caches.match(e.request).then(r => r || fetch(e.request)));
-                    });
-                `;
-                const blob = new Blob([swCode], { type: 'application/javascript' });
-                const swUrl = URL.createObjectURL(blob);
-                navigator.serviceWorker.register(swUrl).catch(() => {});
-            });
-        }
   </script>
 </body>
 </html>
