@@ -78,7 +78,7 @@
     <select id="saved-routes-select" onchange="laadOpgeslagenRoute(this.value)">
       <option value="">-- Routes --</option>
     </select>
-    <button class="btn-danger" onclick="verwijderOpgeslagenRoute()">🗑️</button>
+    <button class="btn-danger" onclick="verwijderOpgeslagenRoute()">🗑️️</button>
 
     <button class="btn-secondary" onclick="undoLast()">Herstel</button>
     <button class="btn-danger" onclick="clearAll()">Wis</button>
@@ -117,45 +117,45 @@
     let watchId = null;
     let lastInstruction = "";
 
-    // Knooppuntenbestanden inladen met robuuste pad-afhandeling
     const files = ["./wandelknooppuntenbe.txt", "./wandelknooppuntennl.txt"];
 
-    async function laadWandelknooppunten() {
-      let geladen = 0;
-      let fouten = [];
-
-      document.getElementById('status').innerText = "⏳ Be- en NL knooppunten inladen...";
-
-      for (const f of files) {
-        try {
-          const res = await fetch(f);
-          if (!res.ok) {
-            fouten.push(f);
-            continue;
-          }
-          const text = await res.text();
-          
-          Papa.parse(text, {
-            skipEmptyLines: true,
-            complete: function(results) {
+    function parseFile(fileUrl) {
+      return new Promise((resolve) => {
+        Papa.parse(fileUrl, {
+          download: true,
+          skipEmptyLines: true,
+          complete: function(results) {
+            if (results && results.data) {
               const nodes = results.data.map(row => ({
                 lon: parseFloat(row[0]),
                 lat: parseFloat(row[1]),
                 ref: row[2] ? row[2].toString().trim() : ''
               })).filter(n => !isNaN(n.lat) && !isNaN(n.lon));
-              
-              allNodes = allNodes.concat(nodes);
-              geladen += nodes.length;
-              document.getElementById('status').innerText = `✔ ${geladen.toLocaleString()} knooppunten geladen. Tik op een knooppunt.`;
+              resolve(nodes);
+            } else {
+              resolve([]);
             }
-          });
-        } catch(e) {
-          fouten.push(f);
-        }
+          },
+          error: function() {
+            resolve([]);
+          }
+        });
+      });
+    }
+
+    async function laadWandelknooppunten() {
+      document.getElementById('status').innerText = "⏳ Knooppunten inladen...";
+      allNodes = [];
+
+      for (const f of files) {
+        const nodes = await parseFile(f);
+        allNodes = allNodes.concat(nodes);
       }
 
-      if (fouten.length > 0 && geladen === 0) {
-        document.getElementById('status').innerText = `❌ Kon de TXT-bestanden niet vinden! Controleer of ze exact 'wandelknooppuntenbe.txt' heten.`;
+      if (allNodes.length > 0) {
+        document.getElementById('status').innerText = `✔ ${allNodes.length.toLocaleString()} knooppunten geladen. Tik op de kaart.`;
+      } else {
+        document.getElementById('status').innerText = `❌ Kon de TXT-bestanden niet laden. Controleer de bestandsnamen op GitHub.`;
       }
       
       verversOpgeslagenRoutesLijst();
@@ -166,13 +166,13 @@
     // Klikken op de kaart / knooppunt
     map.on('click', async function(e) {
       if (allNodes.length === 0) {
-        document.getElementById('status').innerText = '❌ Nog geen knooppunten geladen.';
+        document.getElementById('status').innerText = '❌ Knooppunten worden nog geladen...';
         return;
       }
 
       const node = findClosestNode(e.latlng.lat, e.latlng.lng);
       if (!node) {
-        document.getElementById('status').innerText = '❌ Geen knooppunt dichtbij gevonden.';
+        document.getElementById('status').innerText = '❌ Geen knooppunt dichtbij gevonden (binnen 500m).';
         return;
       }
 
@@ -217,10 +217,10 @@
       return minDistance < 500 ? closest : null;
     }
 
-    // --- WANDELPAD ROUTING (ROBUUST VOOR IPHONE / SAFARI) ---
+    // --- AANGEPASTE WANDELPAD ROUTING (Voorkeur voor trage/onverharde wandelpaden) ---
     async function fetchWalkingRoute(startNode, endNode) {
-      // 1. Geoapify Routing API (Hike Mode)
-      const geoapifyUrl = `https://api.geoapify.com/v1/routing?waypoints=${startNode.lat},${startNode.lon}|${endNode.lat},${endNode.lon}&mode=hike&apiKey=61c8a14b5f884a4cb88ef050b9aa42a2`;
+      // Gebruik mode=hike EN type=short om de kortste trage/onverharde wandelpaden te verkiezen boven de autoweg
+      const geoapifyUrl = `https://api.geoapify.com/v1/routing?waypoints=${startNode.lat},${startNode.lon}|${endNode.lat},${endNode.lon}&mode=hike&type=short&apiKey=61c8a14b5f884a4cb88ef050b9aa42a2`;
 
       try {
         const response = await fetch(geoapifyUrl);
@@ -228,18 +228,13 @@
           const data = await response.json();
           if (data.features && data.features.length > 0) {
             const rawCoords = data.features[0].geometry.coordinates;
-            let coords = [];
-            if (Array.isArray(rawCoords[0][0])) {
-              coords = rawCoords.flat(1);
-            } else {
-              coords = rawCoords;
-            }
+            let coords = Array.isArray(rawCoords[0][0]) ? rawCoords.flat(1) : rawCoords;
             return coords.map(c => [c[1], c[0]]);
           }
         }
       } catch (err) {}
 
-      // 2. Fallback: OSRM Foot API met snapping
+      // Fallback OSRM
       const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${startNode.lon},${startNode.lat};${endNode.lon},${endNode.lat}?overview=full&geometries=geojson&snapping=any`;
       try {
         const response = await fetch(osrmUrl);
@@ -251,7 +246,6 @@
         }
       } catch (err) {}
 
-      // 3. Rechte lijn als uiterste noodoplossing
       return [[startNode.lat, startNode.lon], [endNode.lat, endNode.lon]];
     }
 
@@ -306,8 +300,7 @@
       document.getElementById('status').innerText = `Kaart leeggemaakt.`;
     }
 
-    // --- OPSLAAN EN LADEN (LocalStorage) ---
-
+    // --- OPSLAAN EN LADEN ---
     function getOpgeslagenRoutes() {
       const data = localStorage.getItem('wandel_routes');
       return data ? JSON.parse(data) : {};
@@ -397,8 +390,7 @@
       }
     }
 
-    // --- SPRAAK & GPS VOOR SAFARI IPHONE ---
-
+    // --- SPRAAK & GPS ---
     function spreek(tekst) {
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
