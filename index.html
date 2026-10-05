@@ -9,7 +9,7 @@
   <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
-  <!-- PapaParse -->
+  <!-- PapaParse voor het inlezen van TXT/CSV -->
   <script src="https://cdnjs.cloudflare.com/ajax/libs/PapaParse/5.4.1/papaparse.min.js"></script>
 
   <style>
@@ -42,7 +42,7 @@
       border-radius: 6px;
       border: 1px solid #ccc;
       background: white;
-      max-width: 150px;
+      max-width: 160px;
     }
 
     .btn-success { background-color: #28a745; color: white; }
@@ -90,13 +90,16 @@
   <div id="map"></div>
 
   <script>
+    // Initialiseer Leaflet kaart
     const map = L.map('map', { tap: true }).setView([51.318, 4.858], 13);
 
+    // Basiskaart (OpenStreetMap)
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '© OpenStreetMap'
     }).addTo(map);
 
+    // Overlay met wandelnetwerken (Waymarked Trails)
     L.tileLayer('https://tile.waymarkedtrails.org/hiking/{z}/{x}/{y}.png', {
       maxZoom: 19,
       opacity: 0.7,
@@ -114,6 +117,7 @@
     let watchId = null;
     let lastInstruction = "";
 
+    // Knooppuntenbestanden inladen
     const files = ["wandelknooppuntenbe.txt", "wandelknooppuntennl.txt"];
 
     async function laadWandelknooppunten() {
@@ -144,6 +148,7 @@
 
     laadWandelknooppunten();
 
+    // Klikken op de kaart / knooppunt
     map.on('click', async function(e) {
       if (allNodes.length === 0) return;
 
@@ -194,249 +199,6 @@
       return minDistance < 500 ? closest : null;
     }
 
-    // Wandel-routing via OSRM (Foot) die altijd werkt op iPhone
+    // --- WANDELPAD ROUTING (ROBUUST VOOR IPHONE / SAFARI) ---
     async function fetchWalkingRoute(startNode, endNode) {
-      const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${startNode.lon},${startNode.lat};${endNode.lon},${endNode.lat}?overview=full&geometries=geojson`;
-
-      try {
-        const response = await fetch(osrmUrl);
-        const data = await response.json();
-        if (data.routes && data.routes.length > 0) {
-          return data.routes[0].geometry.coordinates.map(coord => [coord[1], coord[0]]);
-        }
-      } catch (err) {}
-
-      return [[startNode.lat, startNode.lon], [endNode.lat, endNode.lon]];
-    }
-
-    function updateMap() {
-      polylineGroup.clearLayers();
-      let totalDistanceMeters = 0;
-
-      routeSegments.forEach(segment => {
-        const line = L.polyline(segment, { color: '#28a745', weight: 6, opacity: 0.85 });
-        polylineGroup.addLayer(line);
-      });
-
-      const fullPath = getFullTrackPoints();
-      for (let i = 0; i < fullPath.length - 1; i++) {
-        totalDistanceMeters += L.latLng(fullPath[i]).distanceTo(L.latLng(fullPath[i + 1]));
-      }
-
-      currentDistanceKm = (totalDistanceMeters / 1000).toFixed(1);
-      const lastWp = waypoints[waypoints.length - 1];
-      
-      document.getElementById('info').innerText = `${waypoints.length} knooppunten | ${currentDistanceKm} km`;
-      if (waypoints.length > 0) {
-        document.getElementById('status').innerText = `✔ Knooppunt ${lastWp.ref} toegevoegd.`;
-      }
-    }
-
-    function getFullTrackPoints() {
-      if (waypoints.length === 0) return [];
-      let fullPath = [];
-      routeSegments.forEach((segment, index) => {
-        fullPath = fullPath.concat(index === 0 ? segment : segment.slice(1));
-      });
-      return fullPath;
-    }
-
-    function undoLast() {
-      if (waypoints.length === 0) return;
-      waypoints.pop();
-      const lastMarker = markers.pop();
-      map.removeLayer(lastMarker);
-      if (routeSegments.length > 0) routeSegments.pop();
-      updateMap();
-    }
-
-    function clearAll() {
-      waypoints = [];
-      routeSegments = [];
-      markers.forEach(m => map.removeLayer(m));
-      markers = [];
-      updateMap();
-      document.getElementById('info').innerText = `0 km`;
-      document.getElementById('status').innerText = `Kaart leeggemaakt.`;
-    }
-
-    function getOpgeslagenRoutes() {
-      const data = localStorage.getItem('wandel_routes');
-      return data ? JSON.parse(data) : {};
-    }
-
-    function slaRouteOp() {
-      if (waypoints.length < 2) {
-        alert("Maak eerst een route van minstens 2 knooppunten.");
-        return;
-      }
-
-      const knooppuntenReeks = waypoints.map(w => w.ref).join('-');
-      const standaardNaam = `Wandeling (${knooppuntenReeks}) - ${currentDistanceKm} km`;
-      
-      const routeNaam = prompt("Geef een naam voor deze wandelroute:", standaardNaam);
-      if (!routeNaam || routeNaam.trim() === "") return;
-
-      const routes = getOpgeslagenRoutes();
-      routes[routeNaam.trim()] = {
-        waypoints: waypoints,
-        routeSegments: routeSegments,
-        distanceKm: currentDistanceKm
-      };
-
-      localStorage.setItem('wandel_routes', JSON.stringify(routes));
-      verversOpgeslagenRoutesLijst();
-      document.getElementById('saved-routes-select').value = routeNaam.trim();
-      alert(`Route "${routeNaam}" opgeslagen!`);
-    }
-
-    function verversOpgeslagenRoutesLijst() {
-      const select = document.getElementById('saved-routes-select');
-      select.innerHTML = '<option value="">-- Routes --</option>';
-      const routes = getOpgeslagenRoutes();
-
-      for (const naam in routes) {
-        const option = document.createElement('option');
-        option.value = naam;
-        option.textContent = `${naam} (${routes[naam].distanceKm} km)`;
-        select.appendChild(option);
-      }
-    }
-
-    function laadOpgeslagenRoute(naam) {
-      if (!naam) return;
-      const routes = getOpgeslagenRoutes();
-      const route = routes[naam];
-      if (!route) return;
-
-      clearAll();
-
-      waypoints = route.waypoints;
-      routeSegments = route.routeSegments;
-
-      waypoints.forEach(node => {
-        const customIcon = L.divIcon({
-          className: 'wandel-badge',
-          html: node.ref,
-          iconSize: [26, 26],
-          iconAnchor: [13, 13]
-        });
-        const marker = L.marker([node.lat, node.lon], { icon: customIcon }).addTo(map);
-        markers.push(marker);
-      });
-
-      updateMap();
-
-      if (markers.length > 0) {
-        const group = L.featureGroup(markers);
-        map.fitBounds(group.getBounds().pad(0.2));
-      }
-
-      document.getElementById('status').innerText = `✔ Route "${naam}" geladen!`;
-    }
-
-    function verwijderOpgeslagenRoute() {
-      const select = document.getElementById('saved-routes-select');
-      const naam = select.value;
-      if (!naam) return;
-
-      if (confirm(`Route "${naam}" verwijderen?`)) {
-        const routes = getOpgeslagenRoutes();
-        delete routes[naam];
-        localStorage.setItem('wandel_routes', JSON.stringify(routes));
-        verversOpgeslagenRoutesLijst();
-        clearAll();
-      }
-    }
-
-    // --- SPRAAK & GPS VOOR SAFARI IPHONE ---
-
-    function spreek(tekst) {
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-        const utterance = new SpeechSynthesisUtterance(tekst);
-        utterance.lang = 'nl-NL';
-        utterance.rate = 1.0;
-        window.speechSynthesis.speak(utterance);
-        lastInstruction = tekst;
-        document.getElementById('status').innerText = `🗣️ ${tekst}`;
-      }
-    }
-
-    let huidigKnooppuntIndex = 1;
-
-    function startNavigatie() {
-      if (waypoints.length < 2) {
-        alert("Kies of laad eerst een route.");
-        return;
-      }
-
-      // Safari spraak-activatie via knopklik
-      spreek(`Start navigatie. Wandel naar knooppunt ${waypoints[0].ref}`);
-
-      huidigKnooppuntIndex = 1;
-      document.getElementById('btn-start').style.display = 'none';
-      document.getElementById('btn-stop').style.display = 'inline-block';
-
-      if (navigator.geolocation) {
-        watchId = navigator.geolocation.watchPosition(updatePositie, (err) => {
-          alert("Schakel GPS / Locatievoorzieningen in voor Safari op je iPhone.");
-        }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
-      }
-    }
-
-    function stopNavigatie() {
-      if (watchId) navigator.geolocation.clearWatch(watchId);
-      document.getElementById('btn-start').style.display = 'inline-block';
-      document.getElementById('btn-stop').style.display = 'none';
-      spreek("Navigatie gestopt.");
-    }
-
-    function updatePositie(pos) {
-      const uLat = pos.coords.latitude;
-      const uLon = pos.coords.longitude;
-      const heading = pos.coords.heading;
-
-      if (!userMarker) {
-        userMarker = L.marker([uLat, uLon]).addTo(map);
-      } else {
-        userMarker.setLatLng([uLat, uLon]);
-      }
-
-      if (huidigKnooppuntIndex >= waypoints.length) {
-        spreek("Je hebt de eindbestemming bereikt!");
-        stopNavigatie();
-        return;
-      }
-
-      const doelNode = waypoints[huidigKnooppuntIndex];
-      const afstand = L.latLng(uLat, uLon).distanceTo(L.latLng(doelNode.lat, doelNode.lon));
-
-      if (afstand < 15) {
-        huidigKnooppuntIndex++;
-        const volgendPunt = waypoints[huidigKnooppuntIndex];
-        if (volgendPunt) {
-          spreek(`Knooppunt ${doelNode.ref} bereikt. Vervolg de wandelroute naar knooppunt ${volgendPunt.ref}`);
-        }
-        return;
-      }
-
-      if (afstand < 40 && heading !== null && !isNaN(heading)) {
-        const dLat = (doelNode.lat - uLat) * Math.PI / 180;
-        const dLon = (doelNode.lon - uLon) * Math.PI / 180;
-        const y = Math.sin(dLon) * Math.cos(doelNode.lat * Math.PI / 180);
-        const x = Math.cos(uLat * Math.PI / 180) * Math.sin(doelNode.lat * Math.PI / 180) - Math.sin(uLat * Math.PI / 180) * Math.cos(doelNode.lat * Math.PI / 180) * Math.cos(dLon);
-        const doelKoers = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
-
-        let hoek = (doelKoers - heading + 360) % 360;
-
-        if (hoek > 45 && hoek < 135) {
-          spreek(`Over ${Math.round(afstand)} meter rechtsaf wandelpad op naar knooppunt ${doelNode.ref}`);
-        } else if (hoek > 225 && hoek < 315) {
-          spreek(`Over ${Math.round(afstand)} meter linksaf wandelpad op naar knooppunt ${doelNode.ref}`);
-        }
-      }
-    }
-  </script>
-</body>
-</html>
+      // 1. Geoapify Routing API (Hike Mode - werkt feilloos op iOS via HTTPS
