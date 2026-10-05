@@ -78,7 +78,7 @@
     <select id="saved-routes-select" onchange="laadOpgeslagenRoute(this.value)">
       <option value="">-- Routes --</option>
     </select>
-    <button class="btn-danger" onclick="verwijderOpgeslagenRoute()">🗑️️</button>
+    <button class="btn-danger" onclick="verwijderOpgeslagenRoute()">🗑</button>
 
     <button class="btn-secondary" onclick="undoLast()">Herstel</button>
     <button class="btn-danger" onclick="clearAll()">Wis</button>
@@ -90,16 +90,13 @@
   <div id="map"></div>
 
   <script>
-    // Initialiseer Leaflet kaart
     const map = L.map('map', { tap: true }).setView([51.318, 4.858], 13);
 
-    // Basiskaart (OpenStreetMap)
     L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
       maxZoom: 19,
       attribution: '© OpenStreetMap'
     }).addTo(map);
 
-    // Overlay met wandelnetwerken (Waymarked Trails)
     L.tileLayer('https://tile.waymarkedtrails.org/hiking/{z}/{x}/{y}.png', {
       maxZoom: 19,
       opacity: 0.7,
@@ -115,7 +112,6 @@
     
     let userMarker = null;
     let watchId = null;
-    let lastInstruction = "";
 
     const files = ["./wandelknooppuntenbe.txt", "./wandelknooppuntennl.txt"];
 
@@ -136,9 +132,7 @@
               resolve([]);
             }
           },
-          error: function() {
-            resolve([]);
-          }
+          error: function() { resolve([]); }
         });
       });
     }
@@ -155,7 +149,7 @@
       if (allNodes.length > 0) {
         document.getElementById('status').innerText = `✔ ${allNodes.length.toLocaleString()} knooppunten geladen. Tik op de kaart.`;
       } else {
-        document.getElementById('status').innerText = `❌ Kon de TXT-bestanden niet laden. Controleer de bestandsnamen op GitHub.`;
+        document.getElementById('status').innerText = `❌ Kon de TXT-bestanden niet laden.`;
       }
       
       verversOpgeslagenRoutesLijst();
@@ -163,12 +157,8 @@
 
     laadWandelknooppunten();
 
-    // Klikken op de kaart / knooppunt
     map.on('click', async function(e) {
-      if (allNodes.length === 0) {
-        document.getElementById('status').innerText = '❌ Knooppunten worden nog geladen...';
-        return;
-      }
+      if (allNodes.length === 0) return;
 
       const node = findClosestNode(e.latlng.lat, e.latlng.lng);
       if (!node) {
@@ -217,11 +207,22 @@
       return minDistance < 500 ? closest : null;
     }
 
-    // --- AANGEPASTE WANDELPAD ROUTING (Voorkeur voor trage/onverharde wandelpaden) ---
+    // --- STRIKTE WANDELPAD ROUTING (ONVERHARD / TRAGE WEGEN VOORKEUR) ---
     async function fetchWalkingRoute(startNode, endNode) {
-      // Gebruik mode=hike EN type=short om de kortste trage/onverharde wandelpaden te verkiezen boven de autoweg
-      const geoapifyUrl = `https://api.geoapify.com/v1/routing?waypoints=${startNode.lat},${startNode.lon}|${endNode.lat},${endNode.lon}&mode=hike&type=short&apiKey=61c8a14b5f884a4cb88ef050b9aa42a2`;
+      // 1. OSRM Foot routering proberen (volgt nauwkeuriger wandelpaden in OSM)
+      const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${startNode.lon},${startNode.lat};${endNode.lon},${endNode.lat}?overview=full&geometries=geojson&snapping=any`;
+      try {
+        const response = await fetch(osrmUrl);
+        if (response.ok) {
+          const data = await response.json();
+          if (data.routes && data.routes.length > 0) {
+            return data.routes[0].geometry.coordinates.map(coord => [coord[1], coord[0]]);
+          }
+        }
+      } catch (err) {}
 
+      // 2. Geoapify Hike fallback
+      const geoapifyUrl = `https://api.geoapify.com/v1/routing?waypoints=${startNode.lat},${startNode.lon}|${endNode.lat},${endNode.lon}&mode=hike&apiKey=61c8a14b5f884a4cb88ef050b9aa42a2`;
       try {
         const response = await fetch(geoapifyUrl);
         if (response.ok) {
@@ -230,18 +231,6 @@
             const rawCoords = data.features[0].geometry.coordinates;
             let coords = Array.isArray(rawCoords[0][0]) ? rawCoords.flat(1) : rawCoords;
             return coords.map(c => [c[1], c[0]]);
-          }
-        }
-      } catch (err) {}
-
-      // Fallback OSRM
-      const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${startNode.lon},${startNode.lat};${endNode.lon},${endNode.lat}?overview=full&geometries=geojson&snapping=any`;
-      try {
-        const response = await fetch(osrmUrl);
-        if (response.ok) {
-          const data = await response.json();
-          if (data.routes && data.routes.length > 0) {
-            return data.routes[0].geometry.coordinates.map(coord => [coord[1], coord[0]]);
           }
         }
       } catch (err) {}
@@ -300,7 +289,6 @@
       document.getElementById('status').innerText = `Kaart leeggemaakt.`;
     }
 
-    // --- OPSLAAN EN LADEN ---
     function getOpgeslagenRoutes() {
       const data = localStorage.getItem('wandel_routes');
       return data ? JSON.parse(data) : {};
@@ -390,7 +378,6 @@
       }
     }
 
-    // --- SPRAAK & GPS ---
     function spreek(tekst) {
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
@@ -398,7 +385,6 @@
         utterance.lang = 'nl-NL';
         utterance.rate = 1.0;
         window.speechSynthesis.speak(utterance);
-        lastInstruction = tekst;
         document.getElementById('status').innerText = `🗣️ ${tekst}`;
       }
     }
