@@ -115,7 +115,7 @@
     let userMarker = null;
     let watchId = null;
 
-    // Bestandsnamen van de knooppunten (zorg dat deze exact zo op GitHub staan)
+    // Bestandsnamen van de knooppunten
     const files = ["wandelknooppuntenbe.txt", "wandelknooppuntennl.txt"];
 
     function parseFile(fileUrl) {
@@ -137,7 +137,7 @@
           },
           error: function(err) {
             console.warn(`Kon bestand ${fileUrl} niet laden:`, err);
-            resolve([]); // Geeft lege array terug bij fout zodat script niet vastloopt
+            resolve([]);
           }
         });
       });
@@ -213,59 +213,26 @@
       return minDistance < 500 ? closest : null;
     }
 
-    // --- EXACT WANDELNETWERK VOLGEN VIA OVERPASS API (RODE LIJNEN) ---
+    // --- B-ROUTER HIKING ROUTING (VOLGT RODE WANDELNETWERKLIJNEN) ---
     async function fetchWalkingRoute(startNode, endNode) {
-      const overpassQuery = `
-        [out:json][timeout:10];
-        (
-          relation["network"="rwn"]["type"="route"](around:300, ${startNode.lat}, ${startNode.lon});
-          relation["network"="lwn"]["type"="route"](around:300, ${startNode.lat}, ${startNode.lon});
-        );
-        out body;
-        >;
-        out skel qt;
-      `;
+      // 1. Probeer BRouter wandelnetwerk-engine
+      const brouterUrl = `https://brouter.de/brouter?lon1=${startNode.lon}&lat1=${startNode.lat}&lon2=${endNode.lon}&lat2=${endNode.lat}&profile=hiking-beta&format=geojson`;
       
       try {
-        const response = await fetch('https://overpass-api.de/api/interpreter', {
-          method: 'POST',
-          body: 'data=' + encodeURIComponent(overpassQuery)
-        });
-
-        if (response.ok) {
-          const data = await response.json();
-          
-          const nodesMap = {};
-          data.elements.forEach(el => {
-            if (el.type === 'node') nodesMap[el.id] = [el.lat, el.lon];
-          });
-
-          const ways = data.elements.filter(el => el.type === 'way');
-          
-          for (const way of ways) {
-            if (!way.nodes) continue;
-            const coords = way.nodes.map(nid => nodesMap[nid]).filter(c => c !== undefined);
-            
-            if (coords.length > 1) {
-              const firstDist = L.latLng(coords[0]).distanceTo(L.latLng(startNode.lat, startNode.lon));
-              const lastDist = L.latLng(coords[coords.length - 1]).distanceTo(L.latLng(endNode.lat, endNode.lon));
-              
-              const firstDistRev = L.latLng(coords[0]).distanceTo(L.latLng(endNode.lat, endNode.lon));
-              const lastDistRev = L.latLng(coords[coords.length - 1]).distanceTo(L.latLng(startNode.lat, startNode.lon));
-
-              if ((firstDist < 150 && lastDist < 150)) {
-                return coords;
-              } else if (firstDistRev < 150 && lastDistRev < 150) {
-                return coords.reverse();
-              }
-            }
+        const res = await fetch(brouterUrl);
+        if (res.ok) {
+          const geojson = await res.json();
+          if (geojson.features && geojson.features.length > 0) {
+            const coords = geojson.features[0].geometry.coordinates;
+            // BRouter geeft [lon, lat], converteren naar Leaflet [lat, lon]
+            return coords.map(c => [c[1], c[0]]);
           }
         }
       } catch (e) {
-        console.warn("Overpass netwerk mislukt, fallback naar OSRM.");
+        console.warn("BRouter wandel-API niet bereikbaar, fallback naar OSRM.", e);
       }
 
-      // Fallback naar OSRM voetgangersmodus
+      // 2. Fallback: OSRM voetgangersprofiel
       const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${startNode.lon},${startNode.lat};${endNode.lon},${endNode.lat}?overview=full&geometries=geojson`;
       try {
         const response = await fetch(osrmUrl);
