@@ -115,7 +115,8 @@
     let userMarker = null;
     let watchId = null;
 
-    const files = ["./wandelknooppuntenbe.txt", "./wandelknooppuntennl.txt"];
+    // Bestandsnamen van de knooppunten (zorg dat deze exact zo op GitHub staan)
+    const files = ["wandelknooppuntenbe.txt", "wandelknooppuntennl.txt"];
 
     function parseFile(fileUrl) {
       return new Promise((resolve) => {
@@ -134,7 +135,10 @@
               resolve([]);
             }
           },
-          error: function() { resolve([]); }
+          error: function(err) {
+            console.warn(`Kon bestand ${fileUrl} niet laden:`, err);
+            resolve([]); // Geeft lege array terug bij fout zodat script niet vastloopt
+          }
         });
       });
     }
@@ -151,7 +155,7 @@
       if (allNodes.length > 0) {
         document.getElementById('status').innerText = `✔ ${allNodes.length.toLocaleString()} knooppunten geladen. Tik op de kaart.`;
       } else {
-        document.getElementById('status').innerText = `❌ Kon de TXT-bestanden niet laden.`;
+        document.getElementById('status').innerText = `❌ Kon de TXT-bestanden niet laden. Controleer of 'wandelknooppuntenbe.txt' op GitHub staat!`;
       }
       
       verversOpgeslagenRoutesLijst();
@@ -211,7 +215,6 @@
 
     // --- EXACT WANDELNETWERK VOLGEN VIA OVERPASS API (RODE LIJNEN) ---
     async function fetchWalkingRoute(startNode, endNode) {
-      // 1. Zoek het officiële wandelnetwerk-traject (de rode lijn op de kaart)
       const overpassQuery = `
         [out:json][timeout:10];
         (
@@ -262,7 +265,7 @@
         console.warn("Overpass netwerk mislukt, fallback naar OSRM.");
       }
 
-      // 2. Fallback: OSRM voetgangersmodus als overpass niks vind
+      // Fallback naar OSRM voetgangersmodus
       const osrmUrl = `https://router.project-osrm.org/route/v1/foot/${startNode.lon},${startNode.lat};${endNode.lon},${endNode.lat}?overview=full&geometries=geojson`;
       try {
         const response = await fetch(osrmUrl);
@@ -354,4 +357,153 @@
 
       localStorage.setItem('wandel_routes', JSON.stringify(routes));
       verversOpgeslagenRoutesLijst();
-      document.getElementById('saved-routes-
+      document.getElementById('saved-routes-select').value = routeNaam.trim();
+      alert(`Route "${routeNaam}" opgeslagen!`);
+    }
+
+    function verversOpgeslagenRoutesLijst() {
+      const select = document.getElementById('saved-routes-select');
+      select.innerHTML = '<option value="">-- Routes --</option>';
+      const routes = getOpgeslagenRoutes();
+
+      for (const naam in routes) {
+        const option = document.createElement('option');
+        option.value = naam;
+        option.textContent = `${naam} (${routes[naam].distanceKm} km)`;
+        select.appendChild(option);
+      }
+    }
+
+    function laadOpgeslagenRoute(naam) {
+      if (!naam) return;
+      const routes = getOpgeslagenRoutes();
+      const route = routes[naam];
+      if (!route) return;
+
+      clearAll();
+
+      waypoints = route.waypoints;
+      routeSegments = route.routeSegments;
+
+      waypoints.forEach(node => {
+        const customIcon = L.divIcon({
+          className: 'wandel-badge',
+          html: node.ref,
+          iconSize: [26, 26],
+          iconAnchor: [13, 13]
+        });
+        const marker = L.marker([node.lat, node.lon], { icon: customIcon }).addTo(map);
+        markers.push(marker);
+      });
+
+      updateMap();
+
+      if (markers.length > 0) {
+        const group = L.featureGroup(markers);
+        map.fitBounds(group.getBounds().pad(0.2));
+      }
+
+      document.getElementById('status').innerText = `✔ Route "${naam}" geladen!`;
+    }
+
+    function verwijderOpgeslagenRoute() {
+      const select = document.getElementById('saved-routes-select');
+      const naam = select.value;
+      if (!naam) return;
+
+      if (confirm(`Route "${naam}" verwijderen?`)) {
+        const routes = getOpgeslagenRoutes();
+        delete routes[naam];
+        localStorage.setItem('wandel_routes', JSON.stringify(routes));
+        verversOpgeslagenRoutesLijst();
+        clearAll();
+      }
+    }
+
+    function spreek(tekst) {
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const utterance = new SpeechSynthesisUtterance(tekst);
+        utterance.lang = 'nl-NL';
+        utterance.rate = 1.0;
+        window.speechSynthesis.speak(utterance);
+        document.getElementById('status').innerText = `🗣️ ${tekst}`;
+      }
+    }
+
+    let huidigKnooppuntIndex = 1;
+
+    function startNavigatie() {
+      if (waypoints.length < 2) {
+        alert("Kies of laad eerst een route.");
+        return;
+      }
+
+      spreek(`Start navigatie. Wandel naar knooppunt ${waypoints[0].ref}`);
+
+      huidigKnooppuntIndex = 1;
+      document.getElementById('btn-start').style.display = 'none';
+      document.getElementById('btn-stop').style.display = 'inline-block';
+
+      if (navigator.geolocation) {
+        watchId = navigator.geolocation.watchPosition(updatePositie, (err) => {
+          alert("Schakel GPS / Locatievoorzieningen in op je toestel.");
+        }, { enableHighAccuracy: true, maximumAge: 1000, timeout: 10000 });
+      }
+    }
+
+    function stopNavigatie() {
+      if (watchId) navigator.geolocation.clearWatch(watchId);
+      document.getElementById('btn-start').style.display = 'inline-block';
+      document.getElementById('btn-stop').style.display = 'none';
+      spreek("Navigatie gestopt.");
+    }
+
+    function updatePositie(pos) {
+      const uLat = pos.coords.latitude;
+      const uLon = pos.coords.longitude;
+      const heading = pos.coords.heading;
+
+      if (!userMarker) {
+        userMarker = L.marker([uLat, uLon]).addTo(map);
+      } else {
+        userMarker.setLatLng([uLat, uLon]);
+      }
+
+      if (huidigKnooppuntIndex >= waypoints.length) {
+        spreek("Je hebt de eindbestemming bereikt!");
+        stopNavigatie();
+        return;
+      }
+
+      const doelNode = waypoints[huidigKnooppuntIndex];
+      const afstand = L.latLng(uLat, uLon).distanceTo(L.latLng(doelNode.lat, doelNode.lon));
+
+      if (afstand < 15) {
+        huidigKnooppuntIndex++;
+        const volgendPunt = waypoints[huidigKnooppuntIndex];
+        if (volgendPunt) {
+          spreek(`Knooppunt ${doelNode.ref} bereikt. Vervolg de wandelroute naar knooppunt ${volgendPunt.ref}`);
+        }
+        return;
+      }
+
+      if (afstand < 40 && heading !== null && !isNaN(heading)) {
+        const dLat = (doelNode.lat - uLat) * Math.PI / 180;
+        const dLon = (doelNode.lon - uLon) * Math.PI / 180;
+        const y = Math.sin(dLon) * Math.cos(doelNode.lat * Math.PI / 180);
+        const x = Math.cos(uLat * Math.PI / 180) * Math.sin(doelNode.lat * Math.PI / 180) - Math.sin(uLat * Math.PI / 180) * Math.cos(doelNode.lat * Math.PI / 180) * Math.cos(dLon);
+        const doelKoers = (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+
+        let hoek = (doelKoers - heading + 360) % 360;
+
+        if (hoek > 45 && hoek < 135) {
+          spreek(`Over ${Math.round(afstand)} meter rechtsaf wandelpad op naar knooppunt ${doelNode.ref}`);
+        } else if (hoek > 225 && hoek < 315) {
+          spreek(`Over ${Math.round(afstand)} meter linksaf wandelpad op naar knooppunt ${doelNode.ref}`);
+        }
+      }
+    }
+  </script>
+</body>
+</html>
